@@ -103,26 +103,14 @@ Giải nén file zip vào một thư mục cố định (ví dụ: E:\tools\ffmp
     ```
 
 3.  Cài đặt các thư viện trong `backend`:
-    ```
-    chạy:
+
     ```bash
     pip install -r requirements.txt
     ```
 
-4.  Tạo tệp `.env` trong thư mục `backend` và điền các biến môi trường:
-    ```ini
-    # API Key của Google Gemini
-    GEMINI_API_KEY="AIz..."
-    
-    # (Lựa chọn 1) Đường dẫn đến file service account .json của Google
-    GOOGLE_APPLICATION_CREDENTIALS="C:\path\to\your-google-credentials.json"
-    
-    # (Lựa chọn 2) Thay thế token cứng trong media.py bằng biến này
-    DROPBOX_ACCESS_TOKEN="sl.u.A..."
-    
-    # (Tùy chọn) Nếu ffmpeg không nằm trong PATH
-    FFMPEG_BIN="C:\ffmpeg\bin\ffmpeg.exe"
-    ```
+4.  Sao chép `marketing-flow/.env.example` thành `.env`, sau đó điền các giá trị thật. Những biến bắt buộc cho luồng đầy đủ gồm `GEMINI_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_SPREADSHEET_ID`, `DROPBOX_ACCESS_TOKEN` và các URL `N8N_*_WEBHOOK`.
+
+    Đặt một giá trị ngẫu nhiên dài cho `MFA_API_KEY`. Frontend phải dùng cùng giá trị này. Khi `MFA_API_KEY` để trống, xác thực được tắt để thuận tiện phát triển local.
 
 ### 2. Frontend (Streamlit)
 
@@ -134,7 +122,7 @@ Giải nén file zip vào một thư mục cố định (ví dụ: E:\tools\ffmp
     ```
 
 3.  Cài đặt các thư viện trong `frontend`:
-    chạy:
+
     ```bash
     pip install -r requirements-frontend.txt
     ```
@@ -152,4 +140,22 @@ uvicorn app.main:app --reload --port 8080
 ```bash
 cd frontend
 streamlit run dashboard.py
+```
+
+## 🔐 Lưu ý bảo mật
+
+* Không commit `.env`, service-account JSON hoặc access token.
+* Nếu repository từng chứa Dropbox token, hãy thu hồi token cũ và tạo token mới. Xóa token khỏi file hiện tại không xóa nó khỏi lịch sử Git.
+* Khi bật `MFA_API_KEY`, cấu hình node gọi callback của n8n gửi header `X-API-Key` với cùng giá trị.
+* Các webhook n8n chỉ được cấu hình ở backend; frontend không gọi webhook trực tiếp.
+
+Trạng thái xử lý video được lưu trong SQLite tại `JOB_DB_PATH` nên vẫn tồn tại sau khi backend restart. Job cũ hơn `JOB_RETENTION_DAYS` được dọn khi server khởi động.
+
+## ✅ Kiểm tra
+
+Chạy từ thư mục `marketing-flow/backend`:
+
+```bash
+python -m pytest -q
+python -m compileall -q app
 ```

@@ -36,14 +36,16 @@ from fastapi.concurrency import run_in_threadpool
 # --- IMPORTS TỪ PROJECT ---
 from app.media import transcribe_to_srt
 from app.services import nlp
+from app.config import settings
+from app.validation import resolve_media_path, validate_public_url
 
 # --- PATHS / CONFIG ---
-MEDIA_ROOT = pathlib.Path(os.getenv("MEDIA_ROOT", "media")).resolve()
+MEDIA_ROOT = settings.media_root
 VIDEO_DIR = MEDIA_ROOT / "videos"
 AUDIO_DIR = MEDIA_ROOT / "audio"
 THUMB_DIR = MEDIA_ROOT / "thumbnails"
 
-SPREADSHEET_ID = "1hcFoYNhmJdizx5s2id8gl_iPz_74fp5cZYz0I1bAJH8"
+SPREADSHEET_ID = settings.spreadsheet_id
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
 
 for d in (VIDEO_DIR, AUDIO_DIR, THUMB_DIR):
@@ -495,6 +497,10 @@ def _call_n8n_analysis_webhook(webhook_url: str, payload_dict: dict) -> Optional
 def download_video(url: HttpUrl):
     # (Hàm này không thay đổi, giữ nguyên)
     url = _normalize_tiktok_url(str(url))
+    try:
+        validate_public_url(url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     saved_path = None
     note = None
     if "tiktok.com" in url:
@@ -530,7 +536,10 @@ def analyze_video(path: Optional[str] = Query(None), url: Optional[HttpUrl] = Qu
         raise HTTPException(400, "Provide either 'path' or 'url'.")
     local_path = None
     if path:
-        local_path = path
+        try:
+            local_path = str(resolve_media_path(path))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if not os.path.exists(local_path):
             raise HTTPException(404, f"File not found: {local_path}")
     else:
@@ -565,9 +574,6 @@ async def viral_analyze(
     keyword: str = Query(..., description="Keyword do người dùng nhập"), 
     target_sheet: str = Query(..., description="Tên của tab (sheet) để upload kết quả"),
     
-    # [THÊM DÒNG NÀY]
-    n8n_webhook_url: Optional[str] = Query(None, description="Webhook n8n cụ thể để gọi"),
-    
     audio_ext: str = Query(".mp3", pattern=r"^\.(mp3|wav)$"),
     language: Optional[str] = Query("vi", description="Ngôn ngữ (ví dụ: 'vi', 'en')"),
 ):
@@ -581,6 +587,13 @@ async def viral_analyze(
     - 6. Trả về CẢ HAI danh sách cho frontend.
     """
     
+    allowed_sheets = {"Source Phân tích Video", "Source Chỉnh sửa Video"}
+    if target_sheet not in allowed_sheets:
+        raise HTTPException(status_code=400, detail="Unsupported target sheet.")
+    if not SPREADSHEET_ID:
+        raise HTTPException(status_code=503, detail="GOOGLE_SPREADSHEET_ID is not configured.")
+    n8n_webhook_url = settings.webhook_for_sheet(target_sheet)
+
     # 1) Download và Extract Audio
     dl = await run_in_threadpool(download_video, url=url)
     video_path = dl.saved_path

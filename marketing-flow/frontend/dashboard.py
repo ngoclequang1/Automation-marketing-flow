@@ -7,7 +7,22 @@ import pandas as pd
 import re # Thêm re để xử lý text
 
 # URL backend FastAPI của bạn
-API_URL = "http://localhost:8080"
+API_URL = os.getenv("MFA_API_URL", "http://localhost:8080").rstrip("/")
+API_KEY = os.getenv("MFA_API_KEY", "")
+
+
+def api_request(method, path, *, timeout=30, **kwargs):
+    """Single backend client with consistent authentication and timeouts."""
+    headers = dict(kwargs.pop("headers", {}))
+    if API_KEY:
+        headers["X-API-Key"] = API_KEY
+    return requests.request(
+        method,
+        f"{API_URL}{path}",
+        headers=headers,
+        timeout=timeout,
+        **kwargs,
+    )
 
 # --- GIAO DIỆN CHÍNH ---
 st.set_page_config(
@@ -50,7 +65,7 @@ def refresh_sheet_data(sheet_name, state_key):
     """
     try:
         with st.spinner(f"Đang tải dữ liệu từ sheet '{sheet_name}'..."):
-            res = requests.get(f"{API_URL}/export/sheet/read", params={"sheet_name": sheet_name})
+            res = api_request("GET", "/export/sheet/read", params={"sheet_name": sheet_name})
             if res.status_code == 200:
                 st.session_state[state_key] = res.json().get('data', [])
                 st.toast(f"Tải lại dữ liệu sheet '{sheet_name}' thành công!", icon="✅")
@@ -73,7 +88,7 @@ def handle_tick(row_gspread, col_gspread, key, column_name, video_title):
     
     try:
         payload = {"row": row_gspread, "col": col_gspread, "value": new_value}
-        res = requests.post(f"{API_URL}/export/sheet/update-cell", json=payload)
+        res = api_request("POST", "/export/sheet/update-cell", json=payload)
         
         if res.status_code == 200:
             st.toast("✅ Cập nhật Google Sheet thành công!", icon="✅")
@@ -82,14 +97,11 @@ def handle_tick(row_gspread, col_gspread, key, column_name, video_title):
             if column_name == "ready" and new_value is True:
                 st.toast("Đang kích hoạt Webhook...")
                 try:
-                    # LƯU Ý: ĐÂY LÀ WEBHOOK CỦA BẠN, GIỮ NGUYÊN
-                    WEBHOOK_URL = "https://diplex-arletta-supervoluminously.ngrok-free.dev/webhook/e59036d3-dd92-45b6-9b14-cc2e4db45b05"
                     webhook_payload = {
                         "row_index": row_gspread,
-                        "title": video_title,
-                        "event": "ready_for_processing"
+                        "video_title": video_title,
                     }
-                    wh_res = requests.post(WEBHOOK_URL, json=webhook_payload, timeout=5)
+                    wh_res = api_request("POST", "/publish/start", json=webhook_payload, timeout=10)
                     
                     if wh_res.status_code == 200:
                         st.toast("🚀 Webhook đã kích hoạt! n8n đang xử lý...", icon="🎉")
@@ -311,9 +323,8 @@ if active_tab_key == "1. Phân tích Video Tiktok":
                             "language": language,
                             "keyword": tt_keyword,
                             "target_sheet": "Source Phân tích Video",
-                            "n8n_webhook_url": "https://diplex-arletta-supervoluminously.ngrok-free.dev/webhook/8b65e92c-33df-49a6-8949-6fd5cc524a2d"
                         }
-                        res = requests.post(f"{API_URL}/video/viral-analyze", params=params, timeout=300)
+                        res = api_request("POST", "/video/viral-analyze", params=params, timeout=300)
                         
                         if res.status_code == 200:
                             data = res.json()
@@ -403,9 +414,8 @@ elif active_tab_key == "2. Chỉnh sửa Video":
                             "language": language,
                             "keyword": tt_keyword,
                             "target_sheet": "Source Chỉnh sửa Video",
-                            "n8n_webhook_url": "https://diplex-arletta-supervoluminously.ngrok-free.dev/webhook/ac438374-32a4-4f72-9043-a9971d21fe8c"
                         }
-                        res = requests.post(f"{API_URL}/video/viral-analyze", params=params, timeout=300)
+                        res = api_request("POST", "/video/viral-analyze", params=params, timeout=300)
                         
                         if res.status_code == 200:
                             data = res.json()
@@ -546,8 +556,8 @@ elif active_tab_key == "2. Chỉnh sửa Video":
                             files['bgm'] = (remix_bgm_file.name, remix_bgm_file, remix_bgm_file.type)
 
                         # Gọi Endpoint MỚI
-                        start_res = requests.post(
-                            f"{API_URL}/process-remix", 
+                        start_res = api_request(
+                            "POST", "/process-remix", timeout=60,
                             files=files, 
                             data=form_data
                         )
@@ -565,12 +575,16 @@ elif active_tab_key == "2. Chỉnh sửa Video":
                                 
                                 download_url = None
                                 while True:
-                                    status_res = requests.get(f"{API_URL}/process/status/{job_id}")
+                                    status_res = api_request("GET", f"/process/status/{job_id}")
                                     if status_res.status_code != 200:
                                         st.error("Lỗi khi kiểm tra trạng thái job.")
                                         break
                                     
                                     status_data = status_res.json()
+                                    stage = status_data.get('stage', 'processing')
+                                    progress = status_data.get('progress')
+                                    if progress is not None:
+                                        status_placeholder.info(f"Đang xử lý: {stage} ({progress}%)")
                                     
                                     if status_data.get('status') == 'complete':
                                         status_placeholder.success("Xử lý hoàn tất! Video đã được upload lên Dropbox và Google Sheet.")
@@ -843,10 +857,7 @@ elif active_tab_key == "4. Báo cáo Hiệu suất":
             if st.button("Lấy dữ liệu mới", key="refresh_tab_5_n8n_button", use_container_width=True):
                 with st.spinner("Đang thu thập dữ liệu mới..."):
                     try:
-                        N8N_REPORT_WEBHOOK = "https://diplex-arletta-supervoluminously.ngrok-free.dev/webhook/b6f588e5-46c5-4e2d-9375-f80971ad4d84"
-                        
-                        # Dùng timeout ngắn (fire-and-forget)
-                        res = requests.post(N8N_REPORT_WEBHOOK, json={"event": "report_refresh_requested"}, timeout=5)
+                        res = api_request("POST", "/reports/refresh", timeout=10)
                         
                         if res.status_code == 200:
                             st.success("Đã kích hoạt n8n thành công!")

@@ -1,6 +1,7 @@
 # app/routers/mvp.py
 import os
 import json
+from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, HttpUrl
 import google.generativeai as genai
@@ -11,12 +12,13 @@ from app.services.crawl import smart_fields
 from app.services.nlp import analyze_competitor
 from app.services.sheets import export_rows
 from app.dependencies import get_sheet_client # <-- Sửa 1: Import dependency
+from app.config import settings
 
 router = APIRouter()
 
 # Sửa 2: Dùng model name đúng (giống nlp.py)
 MODEL = "gemini-2.5-flash" 
-SPREADSHEET_ID = "1hcFoYNhmJdizx5s2id8gl_iPz_74fp5cZYz0I1bAJH8"
+SPREADSHEET_ID = settings.spreadsheet_id
 SHEET_TITLE = "MVP_Content_Plan" # Hoặc "MVP_Content_Plan" tùy bạn
 
 # Sửa 3: Khởi tạo model theo cách của nlp.py (cách gọi đúng)

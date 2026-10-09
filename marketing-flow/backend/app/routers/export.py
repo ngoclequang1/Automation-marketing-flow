@@ -7,10 +7,11 @@ from gspread_asyncio import AsyncioGspreadClient
 from app.services.sheets import export_rows, update_sheet_cell, read_sheet_data
 # Import dependency mới
 from app.dependencies import get_sheet_client
+from app.config import settings
 
 router = APIRouter()
 
-SPREADSHEET_ID = "1hcFoYNhmJdizx5s2id8gl_iPz_74fp5cZYz0I1bAJH8"
+SPREADSHEET_ID = settings.spreadsheet_id
 SHEET_TITLE = "MVP_Content_Plan" 
 
 class ExportReq(BaseModel):

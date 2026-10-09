@@ -13,11 +13,17 @@ import json
 import asyncio
 import re 
 import requests # <-- Giữ lại cho Tool 3
+import logging
+import time
 from pydantic import BaseModel # <-- Giữ lại cho Tool 3
 from app.services.sheets import export_rows, read_sheet_data, update_sheet_cell 
 from gspread_asyncio import AsyncioGspreadClient
 from app.media import remix_video_by_scenes, SceneSegment, auto_subtitle_and_bgm
-from app.routers.video import SPREADSHEET_ID
+from app.config import settings
+from app.security import require_api_key
+from app.validation import resolve_media_path
+from app.observability import configure_logging, request_context_middleware
+from app.services.job_store import JobStore
 from fastapi import Request
 from fastapi.responses import StreamingResponse
 from app.dependencies import get_sheet_client
@@ -39,7 +45,12 @@ from app.routers.video import _to_public_url
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("Server đang khởi động...")
+    configure_logging()
+    logger = logging.getLogger("mfa.lifecycle")
+    logger.info("server_starting")
+    removed_jobs = JOB_STATUS.cleanup(settings.job_retention_days)
+    if removed_jobs:
+        logger.info("expired_jobs_removed count=%s", removed_jobs)
     print("Đang xác thực Google Sheet Client...")
     try:
         agcm = _get_async_client_manager()
@@ -52,16 +63,21 @@ async def lifespan(app: FastAPI):
     
     yield
     
-    print("Server đang tắt.")
+    logger.info("server_stopped")
 
 app = FastAPI(
     title="Marketing Flow Automation",
     description="MVP: Analyze URL+Keyword combined (Gemini), plus individual endpoints",
     version="0.3.1",
-    lifespan=lifespan
+    lifespan=lifespan,
+    dependencies=[Depends(require_api_key)],
 )
 
-JOB_STATUS: Dict[str, Dict] = {}
+SPREADSHEET_ID = settings.spreadsheet_id
+
+JOB_STATUS = JobStore(settings.job_db_path)
+
+app.middleware("http")(request_context_middleware)
 
 # ... (Hàm run_video_job giữ nguyên) ...
 async def run_video_job(
@@ -75,6 +91,7 @@ async def run_video_job(
     flip_video: bool
 ):
     try:
+        JOB_STATUS[job_id] = {"status": "processing", "stage": "preparing", "progress": 10}
         video_to_process = temp_video_path
         
         if flip_video:
@@ -82,11 +99,13 @@ async def run_video_job(
             try:
                 await run_in_threadpool(flip_video_horizontal, temp_video_path, flipped_path, do_upload=False)
                 video_to_process = flipped_path
+                JOB_STATUS[job_id] = {"status": "processing", "stage": "flipped", "progress": 35}
             except Exception as e:
                 JOB_STATUS[job_id] = {"status": "failed", "error": f"Failed to flip video: {e}"}
                 shutil.rmtree(temp_workdir)
                 return
         
+        JOB_STATUS[job_id] = {"status": "processing", "stage": "rendering", "progress": 55}
         final_path_str = await run_in_threadpool(
             auto_subtitle_and_bgm,
             video_path=video_to_process,
@@ -96,7 +115,7 @@ async def run_video_job(
             burn_in=burn_in,
             do_upload=False 
         )
-        JOB_STATUS[job_id] = {"status": "complete", "path": final_path_str}
+        JOB_STATUS[job_id] = {"status": "complete", "stage": "complete", "progress": 100, "path": final_path_str}
     
     except Exception as e:
         JOB_STATUS[job_id] = {"status": "failed", "error": str(e)}
@@ -110,13 +129,46 @@ def call_n8n_webhook_in_background(
     webhook_url: str, 
     payload: dict
 ):
-    try:
-        requests.post(webhook_url, json=payload, timeout=5)
-        print(f"Đã kích hoạt webhook cho job: {payload.get('callback_job_id')}")
-    except requests.exceptions.ReadTimeout:
-        pass 
-    except Exception as e:
-        print(f"LỖI khi gọi webhook nền: {e}")
+    logger = logging.getLogger("mfa.n8n")
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            response = requests.post(webhook_url, json=payload, timeout=10)
+            if response.status_code == 429 or response.status_code >= 500:
+                response.raise_for_status()
+            if response.status_code >= 400:
+                logger.error(
+                    "webhook_rejected status=%s body=%s",
+                    response.status_code,
+                    response.text[:500],
+                )
+                last_error = RuntimeError(f"n8n rejected the request with HTTP {response.status_code}")
+                break
+            logger.info(
+                "webhook_sent job_id=%s attempt=%s",
+                payload.get("callback_job_id"),
+                attempt,
+            )
+            return
+        except requests.exceptions.ReadTimeout:
+            # Delivery is ambiguous: retrying could publish the same content twice.
+            logger.warning(
+                "webhook_delivery_unknown job_id=%s reason=read_timeout",
+                payload.get("callback_job_id"),
+            )
+            return
+        except requests.RequestException as exc:
+            last_error = exc
+            logger.warning("webhook_attempt_failed attempt=%s error=%s", attempt, exc)
+            if attempt < 3:
+                time.sleep(2 ** (attempt - 1))
+    job_id = payload.get("callback_job_id")
+    if job_id:
+        JOB_STATUS[job_id] = {
+            "status": "failed",
+            "stage": "webhook",
+            "error": str(last_error),
+        }
 # --- KẾT THÚC ---
 
 # ... (Hàm _normalize_tiktok_url_main, _find_sheet_cell_coords_main, _upload_and_update_remix_sheet, run_remix_job giữ nguyên) ...
@@ -212,9 +264,11 @@ async def run_remix_job(
     flip_video: bool
 ):
     try:
+        JOB_STATUS[job_id] = {"status": "processing", "stage": "preparing", "progress": 10}
         video_to_process = source_video_path
         if do_remix:
             print(f"[{job_id}] Bắt đầu Remix...")
+            JOB_STATUS[job_id] = {"status": "processing", "stage": "remixing", "progress": 25}
             try:
                 highlights_data = json.loads(highlights_json)
                 highlights = [SceneSegment(**s) for s in highlights_data if s]
@@ -234,6 +288,7 @@ async def run_remix_job(
                 video_to_process = source_video_path 
         if flip_video:
             print(f"[{job_id}] Bắt đầu Flip...")
+            JOB_STATUS[job_id] = {"status": "processing", "stage": "flipping", "progress": 45}
             flipped_path = str(temp_workdir / "flipped.mp4")
             try:
                 await run_in_threadpool(flip_video_horizontal, video_to_process, flipped_path, do_upload=False)
@@ -244,6 +299,7 @@ async def run_remix_job(
                 shutil.rmtree(temp_workdir)
                 return
         print(f"[{job_id}] Bắt đầu Subtitle/BGM...")
+        JOB_STATUS[job_id] = {"status": "processing", "stage": "rendering", "progress": 65}
         stem = Path(video_to_process).stem
         out_name = f"{stem}_{job_id}.mp4" if burn_in else f"{stem}_{job_id}.mkv"
         final_output_path = str(EXPORTS_DIR / out_name)
@@ -260,13 +316,14 @@ async def run_remix_job(
         )
         print(f"[{job_id}] Subtitle/BGM hoàn tất. Path: {final_output_path}")
         print(f"[{job_id}] Bắt đầu Upload và cập nhật Sheet...")
+        JOB_STATUS[job_id] = {"status": "processing", "stage": "uploading", "progress": 85}
         await _upload_and_update_remix_sheet(
             gc=gc,
             local_file_path=final_output_path,
             keyword=keyword,
             source_url=source_url
         )
-        JOB_STATUS[job_id] = {"status": "complete", "path": final_output_path}
+        JOB_STATUS[job_id] = {"status": "complete", "stage": "complete", "progress": 100, "path": final_output_path}
     except Exception as e:
         print(f"[{job_id}] LỖI NGHIÊM TRỌNG: {e}")
         JOB_STATUS[job_id] = {"status": "failed", "error": str(e)}
@@ -278,7 +335,6 @@ async def run_remix_job(
 class PublishRequest(BaseModel):
     row_index: int
     video_title: str
-    webhook_url: str 
 
 # (ĐÃ XÓA endpoint /reports/start-refresh và class ReportRefreshRequest)
 
@@ -287,8 +343,10 @@ async def start_publishing_job(
     req: PublishRequest,
     background_tasks: BackgroundTasks
 ):
+    if not settings.n8n_publish_webhook:
+        raise HTTPException(status_code=503, detail="N8N_PUBLISH_WEBHOOK is not configured.")
     job_id = str(uuid4())
-    JOB_STATUS[job_id] = {"status": "processing"}
+    JOB_STATUS[job_id] = {"status": "processing", "stage": "queued", "progress": 0}
     n8n_payload = {
         "row_index": req.row_index,
         "title": req.video_title,
@@ -297,7 +355,7 @@ async def start_publishing_job(
     }
     background_tasks.add_task(
         call_n8n_webhook_in_background,
-        req.webhook_url,
+        settings.n8n_publish_webhook,
         n8n_payload
     )
     return {"status": "processing", "job_id": job_id}
@@ -307,16 +365,28 @@ async def complete_publishing_job(job_id: str):
     if job_id not in JOB_STATUS:
         print(f"CẢNH BÁO: Job ID {job_id} không tìm thấy trong JOB_STATUS.")
         return {"status": "job_not_found", "job_id": job_id}
-    JOB_STATUS[job_id] = {"status": "complete"}
+    JOB_STATUS[job_id] = {"status": "complete", "stage": "complete", "progress": 100}
     print(f"Job {job_id} đã hoàn tất.")
     return {"status": "complete", "job_id": job_id}
+
+
+@app.post("/reports/refresh", tags=["Reporting"])
+async def refresh_reports(background_tasks: BackgroundTasks):
+    if not settings.n8n_report_webhook:
+        raise HTTPException(status_code=503, detail="N8N_REPORT_WEBHOOK is not configured.")
+    background_tasks.add_task(
+        call_n8n_webhook_in_background,
+        settings.n8n_report_webhook,
+        {"event": "report_refresh_requested"},
+    )
+    return {"status": "processing"}
 # --- [KẾT THÚC] ---
 
 
 # ---- CORS ----
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000","http://localhost:8501"],
+    allow_origins=list(settings.cors_origins),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -330,7 +400,7 @@ app.include_router(mvp.router,      prefix="/mvp",      tags=["MVP"])
 app.include_router(video.router, tags=["Video"])
 
 # ---- Static media ----
-MEDIA_ROOT = os.getenv("MEDIA_ROOT", "media")
+MEDIA_ROOT = str(settings.media_root)
 TEMP_DIR = Path(MEDIA_ROOT) / "temp_uploads"
 EXPORTS_DIR = Path(MEDIA_ROOT) / "exports"
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -376,7 +446,7 @@ async def process_video(
     workdir = TEMP_DIR / job_id
     workdir.mkdir(parents=True, exist_ok=True)
     
-    video_path = workdir / (video.filename or "input.mp4")
+    video_path = workdir / Path(video.filename or "input.mp4").name
     bgm_path_str: Optional[str] = None
     
     try:
@@ -387,7 +457,7 @@ async def process_video(
             await video.close()
             
         if bgm:
-            bgm_path = workdir / (bgm.filename or "music.mp3")
+            bgm_path = workdir / Path(bgm.filename or "music.mp3").name
             try:
                 with bgm_path.open("wb") as f:
                     await run_in_threadpool(shutil.copyfileobj, bgm.file, f)
@@ -398,6 +468,11 @@ async def process_video(
     except Exception as e:
         return JSONResponse(status_code=400, content={"status": "failed", "error": f"File save error: {e}"})
 
+    max_bytes = settings.max_upload_mb * 1024 * 1024
+    if video_path.stat().st_size > max_bytes:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise HTTPException(status_code=413, detail="Video exceeds the configured upload limit.")
+
     stem = video_path.stem
     if flip:
         stem += "_flipped"
@@ -405,7 +480,7 @@ async def process_video(
     out_name = f"{stem}_{job_id}.mp4" if burn_in else f"{stem}_{job_id}.mkv"
     out_path = EXPORTS_DIR / out_name
 
-    JOB_STATUS[job_id] = {"status": "processing"}
+    JOB_STATUS[job_id] = {"status": "processing", "stage": "queued", "progress": 0}
 
     background_tasks.add_task(
         run_video_job, 
@@ -447,7 +522,7 @@ async def process_remix_video(
     
     try:
         if bgm:
-            bgm_path = workdir / (bgm.filename or "music.mp3")
+            bgm_path = workdir / Path(bgm.filename or "music.mp3").name
             try:
                 with bgm_path.open("wb") as f:
                     await run_in_threadpool(shutil.copyfileobj, bgm.file, f)
@@ -455,13 +530,17 @@ async def process_remix_video(
                 await bgm.close()
             bgm_path_str = str(bgm_path) # <-- ĐÃ SỬA LỖI TYPO (từ bgGg)
             
+        try:
+            source_video_path = str(resolve_media_path(source_video_path))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if not os.path.exists(source_video_path):
              raise HTTPException(status_code=404, detail=f"Source video path not found: {source_video_path}")
 
     except Exception as e:
         return JSONResponse(status_code=400, content={"status": "failed", "error": f"File save error: {e}"})
 
-    JOB_STATUS[job_id] = {"status": "processing"}
+    JOB_STATUS[job_id] = {"status": "processing", "stage": "queued", "progress": 0}
 
     background_tasks.add_task(
         run_remix_job,

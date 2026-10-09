@@ -1,6 +1,7 @@
 import os, requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, quote
+from app.validation import validate_public_url
 
 # ---------- Headers ----------
 DESKTOP_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -16,6 +17,7 @@ MOBILE_HEADERS = {**DEFAULT_HEADERS, "User-Agent": MOBILE_UA}
 
 # ---------- Generic fetch & parse ----------
 def fetch_html(url: str, timeout: int = 25) -> str:
+    validate_public_url(url)
     r = requests.get(url, headers=DEFAULT_HEADERS, timeout=timeout, allow_redirects=True)
     r.raise_for_status()
     return r.text
@@ -138,6 +140,7 @@ def smart_fields(url: str) -> dict:
     - Other websites → plain requests; if content looks too thin and MFA_RENDER=1, try headless render
     """
     try:
+        validate_public_url(url)
         # TikTok
         if _is_tiktok(url):
             if _is_tiktok_video(url):

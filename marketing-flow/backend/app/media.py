@@ -1,7 +1,6 @@
 import os
 import subprocess
 import tempfile
-import dropbox
 import gspread
 import json
 from pathlib import Path
@@ -11,8 +10,7 @@ from pydantic import BaseModel # <-- ĐÃ THÊM
 from pathlib import Path
 from typing import Optional
 from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+from app.services.dropbox_service import upload_to_dropbox as _upload_to_dropbox_service
 # ---------- FFmpeg / ffprobe resolvers ----------
 def get_ffmpeg_bin() -> str:
     env = os.getenv("FFMPEG_BIN")
@@ -370,14 +368,16 @@ def run_ffmpeg(cmd: list) -> None:
             f"FFmpeg failed (code {proc.returncode}).\nBIN: {cmd[0]}\nCMD: {' '.join(cmd)}\n\nSTDERR:\n{proc.stderr}"
         )
 
-# Load your service account JSON
-sheet_id = "1hcFoYNhmJdizx5s2id8gl_iPz_74fp5cZYz0I1bAJH8"
-SERVICE_ACCOUNT_FILE = "C:\\Users\\tt\\Downloads\\ati-demo-472613-ab3aec4504a0.json"
+# Legacy synchronous Sheet helper used by the media pipeline.
+sheet_id = os.getenv("GOOGLE_SPREADSHEET_ID", "")
+SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
 
 def append_dropbox_link_to_sheet(sheet_id: str, dropbox_link: str, column_name: str = "Dropbox link"):
     """
     Append Dropbox link to a Google Sheet row matching the video name.
     """
+    if not sheet_id or not SERVICE_ACCOUNT_FILE:
+        raise RuntimeError("Google Sheets credentials are not configured.")
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
     gc = gspread.authorize(creds)
@@ -405,26 +405,9 @@ def append_dropbox_link_to_sheet(sheet_id: str, dropbox_link: str, column_name: 
     worksheet.update_cell(next_row, col_index, dropbox_link)
     print(f"✅ Added Dropbox link to sheet at row {next_row}, column '{column_name}'.")
 
-# Hardcode your Dropbox access token
-# Thay dropbox token của bạn vào đây
-DROPBOX_ACCESS_TOKEN = "sl.u.AGHvqdXc1SslpSdArCZ8letCqZIV5JAZbTfs8IH28a_3y2_xDOuD6zfB7Jziu5z0tX1tM7Jm0OF2a3VYk8voLFH8UDyxby93FhHSr9HyQOLwAuQhOw8zMYWIeIJXgkFdBEpRYjuyb-6HlWPxXfPNWFlswI1dE2pt-SJ7L6KWZPbA0XSBStTIvjO8HrfJ7YWhu_d9KeiTR5xAI3eMmMSkCoKWfi0Y2rn3qsiSluVUaFIV_xkpmQ4rnLO6CW2fTdTFd5WJ7pOwnWlK3L8g9VbCPmn1kHZN2pXKGUrpbfBMZhEX1eZGOYs4QICwV4Y8jrY9zAurV0hhO-nqtolTJVGZQgwm7DRK5K6uEh7ThlioVJo2SJeTEjGgLaGdvtRywpIfWV3UeWm0kHrguLTM-i0aAPbNfSI4XvoMzoifLYRpmyby-cicrLXbGeT7Cdsl1doRjG2rach71RwyfFES895EnlcLTB9P0y6E8yXyyZeMvNSr3aOw3JjogGlLkVhor2VoGyve0uTvmWRuGGyXgeK96VOEv7QuoP-rAYpbwEITD2G6LtI1_QX0vTh1RfzxYjXnJg0ajWezT5EHTKbWqSSeiqnfJhUea4TNVFvkk1iWAk9Oj2aFlF5eRktLVYbyzCv329hvAKaCrkIHI23DdyOf1VEXt8A9gq3XLpYBJpd-4eWtZVx3SSQUpqHww8LEEouG7nF7lBql0VTHql4zwF9c-br4ev_ICg0QGZeAi4_Rmsu4W_Bk6PSLY7kWUWUkwQMwMcvgMPzXKyUKKvPAOhmhXeYN1wvy6lJEv_PLItlZSyjfACBPajBk-as-k4pbKRswo2o9wwBLKFCU9NTrrQeFQWlFTol5UDAxh7Y4AO1VPHnWzKANsDK_v4HUim5mVNmKl2QVesDtP7FQASBmyYN21_bxYX4AT6KeywK5ElvpebaVraGZgjMDfEzrbHeOBB8jkaAS6DyLxCWe1qQjCQwr99TfgI0y4QYiR1QXpBdE92-nsEY9J7aY_J-2ygfegFwdSgnvQ3lupLK3qAsr0aSLLwhKH3LALGMVfxSMbxhux9tvbJ4lYU8qJ1uoQ4StxtEBRgklW1fwqWTVcSiTWFQ5lSRfdX_iMq8dpGehi6LI3XjwR-S676kirUCGQ_ydEJNhX9n22Vn7Aa5ojc59ZtuM5yJhSRBis6Yyre05oM499-81ZQwwC3-b5AlKKbKRkhZVl4c7elfVdEk-5PAmPJLg-lMzcxSmNMn1Hk6rl7sbhcr9RWJp4iaMJSZxRB7ILy2aMOZ9575EMWJWnGvBNsjuTz8owU_KmwezUnaqDgScRAbFte-xK_LTYhgxyQed7O8R2iYY7B1CquIgRyHe0EJXx0E_Tq_9qUdEWYcqcwNiRDh6KrTRWkSGd5FHxvK2jph0VPN59YkITxu3u7mDABXQCm3l"
-DROPBOX_UPLOAD_PATH = "/Videos"
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
-
-def upload_to_dropbox(local_file_path: str, dropbox_path: str = DROPBOX_UPLOAD_PATH) -> str:
-    """
-    Uploads a local file to Dropbox.
-    Returns the shared link.
-    """
-    file_name = Path(local_file_path).name
-    dropbox_file_path = f"{dropbox_path}/{file_name}"
-
-    with open(local_file_path, "rb") as f:
-        dbx.files_upload(f.read(), dropbox_file_path, mode=dropbox.files.WriteMode.overwrite)
-
-    # Create a shared link
-    shared_link_metadata = dbx.sharing_create_shared_link_with_settings(dropbox_file_path)
-    return shared_link_metadata.url
+def upload_to_dropbox(local_file_path: str, dropbox_path: str | None = None) -> str:
+    """Compatibility wrapper around the environment-configured Dropbox service."""
+    return _upload_to_dropbox_service(local_file_path)
 
 ### Add subtitle and BGM ###
 
