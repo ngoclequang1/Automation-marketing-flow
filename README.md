@@ -151,6 +151,10 @@ streamlit run dashboard.py
 
 Trạng thái xử lý video được lưu trong SQLite tại `JOB_DB_PATH` nên vẫn tồn tại sau khi backend restart. Job cũ hơn `JOB_RETENTION_DAYS` được dọn khi server khởi động.
 
+* `GET /health` kiểm tra process API đang hoạt động.
+* `GET /ready` kiểm tra cấu hình Google, Dropbox, Gemini và n8n của toàn pipeline.
+* Job đang chạy khi backend bị dừng sẽ thành `failed/interrupted` ở lần khởi động kế tiếp, thay vì mắc vĩnh viễn ở trạng thái `processing`.
+
 ## ✅ Kiểm tra
 
 Chạy từ thư mục `marketing-flow/backend`:

@@ -48,6 +48,9 @@ async def lifespan(app: FastAPI):
     configure_logging()
     logger = logging.getLogger("mfa.lifecycle")
     logger.info("server_starting")
+    interrupted_jobs = JOB_STATUS.recover_incomplete()
+    if interrupted_jobs:
+        logger.warning("incomplete_jobs_recovered count=%s", interrupted_jobs)
     removed_jobs = JOB_STATUS.cleanup(settings.job_retention_days)
     if removed_jobs:
         logger.info("expired_jobs_removed count=%s", removed_jobs)
@@ -412,6 +415,25 @@ app.mount("/media", StaticFiles(directory=MEDIA_ROOT), name="media")
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/ready")
+def readiness():
+    checks = {
+        "spreadsheet": bool(settings.spreadsheet_id),
+        "google_credentials": bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS")),
+        "dropbox": bool(os.getenv("DROPBOX_ACCESS_TOKEN")),
+        "gemini": bool(os.getenv("GEMINI_API_KEY")) or os.getenv("MFA_LLM_OFF") == "1",
+        "n8n_analysis": bool(settings.n8n_analysis_webhook),
+        "n8n_edit": bool(settings.n8n_edit_webhook),
+        "n8n_publish": bool(settings.n8n_publish_webhook),
+        "n8n_report": bool(settings.n8n_report_webhook),
+    }
+    ready = all(checks.values())
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={"ready": ready, "checks": checks},
+    )
 # ... (các endpoint debug khác giữ nguyên) ...
 @app.get("/debug/ffmpeg_cmd")
 def debug_ffmpeg_cmd():

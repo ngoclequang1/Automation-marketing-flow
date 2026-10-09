@@ -81,3 +81,25 @@ class JobStore:
         with self._lock, self._connection() as connection:
             cursor = connection.execute("DELETE FROM jobs WHERE updated_at < ?", (cutoff,))
             return cursor.rowcount
+
+    def recover_incomplete(self) -> int:
+        """Mark jobs left in-flight by a previous process as interrupted."""
+        now = datetime.now(timezone.utc).isoformat()
+        recovered = 0
+        with self._lock, self._connection() as connection:
+            rows = connection.execute("SELECT job_id, payload FROM jobs").fetchall()
+            for job_id, serialized in rows:
+                payload = json.loads(serialized)
+                if payload.get("status") != "processing":
+                    continue
+                payload.update(
+                    status="failed",
+                    stage="interrupted",
+                    error="The backend stopped before this job completed. Please start it again.",
+                )
+                connection.execute(
+                    "UPDATE jobs SET payload = ?, updated_at = ? WHERE job_id = ?",
+                    (json.dumps(payload, ensure_ascii=False), now, job_id),
+                )
+                recovered += 1
+        return recovered
